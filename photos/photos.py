@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 import os
+import time
 import re
 import logging
+import shutil
 from pelican import signals
 from pelican.utils import pelican_open
 from PIL import Image, ExifTags
@@ -16,11 +18,13 @@ hrefs = None
 def initialized(pelican):
     p = os.path.expanduser('~/Pictures')
     from pelican.settings import DEFAULT_CONFIG
+    DEFAULT_CONFIG.setdefault('PHOTO_MTIME', False)
     DEFAULT_CONFIG.setdefault('PHOTO_LIBRARY', p)
     DEFAULT_CONFIG.setdefault('PHOTO_GALLERY', (1024, 768, 80))
     DEFAULT_CONFIG.setdefault('PHOTO_ARTICLE', ( 760, 506, 80))
     DEFAULT_CONFIG.setdefault('PHOTO_THUMB',   ( 192, 144, 60))
     if pelican:
+        pelican.settings.setdefault('PHOTO_MTIME', False)
         pelican.settings.setdefault('PHOTO_LIBRARY', p)
         pelican.settings.setdefault('PHOTO_GALLERY', (1024, 768, 80))
         pelican.settings.setdefault('PHOTO_ARTICLE', ( 760, 506, 80))
@@ -56,37 +60,45 @@ def enqueue_resize(orig, resized, spec=(640, 480, 80)):
 
 
 def resize_photos(generator, writer):
-    print('photos: {} photo resizes to consider.'
-          .format(len(queue_resize.items())))
+    print('{} photos: {} photo resizes to consider.'
+          .format(time.time(), len(queue_resize.items())))
+    checkMtime = generator.settings['PHOTO_MTIME']
+    print('check mtime of photos to determine dirtiness? {}'.format(checkMtime))
     for resized, what in queue_resize.items():
         resized = os.path.join(generator.output_path, resized)
         orig, spec = what
-        if (not os.path.isfile(resized) or
-                os.path.getmtime(orig) > os.path.getmtime(resized)):
-            logger.info('photos: make photo %s -> %s', orig, resized)
-            im = Image.open(orig)
-            try:
-                exif = im._getexif()
-            except Exception:
-                exif = None
-            try:
-                icc_profile = im.info.get("icc_profile")
-            except Exception:
-                icc_profile = None
-            if exif:
-                for tag, value in exif.items():
-                    decoded = ExifTags.TAGS.get(tag, tag)
-                    if decoded == 'Orientation':
-                        if   value == 3: im = im.rotate(180)
-                        elif value == 6: im = im.rotate(270)
-                        elif value == 8: im = im.rotate(90)
-                        break
-            im.thumbnail((spec[0], spec[1]), Image.ANTIALIAS)
-            try:
-                os.makedirs(os.path.split(resized)[0])
-            except:
-                pass
-            im.save(resized, 'JPEG', quality=spec[2], icc_profile=icc_profile)
+        if (not os.path.isfile(resized) or (checkMtime and
+                os.path.getmtime(orig) > os.path.getmtime(resized))):
+            logger.info(os.path.splitext(resized)[-1].lower())
+            if os.path.splitext(resized)[-1].lower() == '.gif':
+                logger.info('photos: raw copy mode %s -> %s (%s)', orig, resized, 'gif')
+                shutil.copyfile(orig, resized)
+            else:
+                im = Image.open(orig)
+                logger.info('photos: make photo %s -> %s (%s)', orig, resized, im.format)
+                try:
+                    exif = im._getexif()
+                except Exception:
+                    exif = None
+                try:
+                    icc_profile = im.info.get("icc_profile")
+                except Exception:
+                    icc_profile = None
+                if exif:
+                    for tag, value in exif.items():
+                        decoded = ExifTags.TAGS.get(tag, tag)
+                        if decoded == 'Orientation':
+                            if   value == 3: im = im.rotate(180)
+                            elif value == 6: im = im.rotate(270)
+                            elif value == 8: im = im.rotate(90)
+                            break
+                im.thumbnail((spec[0], spec[1]), Image.ANTIALIAS)
+                try:
+                    os.makedirs(os.path.split(resized)[0])
+                except:
+                    pass
+                im.save(resized, im.format, quality=spec[2], icc_profile=icc_profile)
+    print('{} done'.format(time.time()))
 
 def detect_content(content):
 
@@ -104,8 +116,9 @@ def detect_content(content):
             if not os.path.isfile(path):
                 logger.error('photos: No photo %s', path)
             else:
-                photo = os.path.splitext(value)[0].lower() + 'a.jpg'
-                origin = os.path.join(settings['SITEURL'], 'photos', photo)
+                ext = os.path.splitext(value);
+                photo = ext[0].lower() + 'a'+ ext[1].lower();
+                origin = os.path.join('/photos', photo)
                 enqueue_resize(
                     path,
                     os.path.join('photos', photo),
@@ -128,7 +141,15 @@ def detect_content(content):
         settings = content.settings
         content._content = hrefs.sub(replacer, content._content)
 
-
+def calcScaled(wh, settings):
+    w,h = wh
+    askw = settings[0]
+    askh = settings[1]
+    wr = w/float(askw)
+    hr = h/float(askh)
+    ratio = max(wr, hr)
+    return (int(w/ratio), int(h/ratio))
+    
 def process_gallery_photo(generator, article, gallery):
     if gallery.startswith('/'):
         gallery = gallery[1:]
@@ -143,17 +164,20 @@ def process_gallery_photo(generator, article, gallery):
                            msg='photos: No EXIF for gallery %s')
         captions = read_notes(os.path.join(dir_gallery, 'captions.txt'))
         article.photo_gallery = []
-        for pic in sorted(os.listdir(dir_gallery)):
+        piclist = sorted(os.listdir(dir_gallery))
+
+        for pic in piclist:
             if pic.startswith('.'): continue
             if pic.endswith('.txt'): continue
             photo = os.path.splitext(pic)[0].lower() + '.jpg'
             thumb = os.path.splitext(pic)[0].lower() + 't.jpg'
+            orim = Image.open(dir_gallery+'/'+pic);
             article.photo_gallery.append((
                 pic,
                 os.path.join(dir_photo, photo),
                 os.path.join(dir_thumb, thumb),
                 exifs.get(pic, ''),
-                captions.get(pic, '')))
+                captions.get(pic, ''), calcScaled(orim.size, generator.settings['PHOTO_GALLERY'])))
             enqueue_resize(
                 os.path.join(dir_gallery, pic),
                 os.path.join(dir_photo, photo),
@@ -171,7 +195,7 @@ def process_gallery_filename(generator, article, gallery):
         gallery = gallery[1:]
     else:
         gallery = os.path.join(article.relative_dir, gallery)
-    dir_gallery = os.path.join(generator.path, gallery)
+    dir_gallery = os.path.join(generator.settings['PHOTO_LIBRARY'], gallery)
     if os.path.isdir(dir_gallery):
         logger.info('photos: Gallery detected: %s', gallery)
         dir_photo = gallery.lower()
@@ -185,12 +209,13 @@ def process_gallery_filename(generator, article, gallery):
             if pic.endswith('.txt'): continue
             photo = pic.lower()
             thumb = os.path.splitext(pic)[0].lower() + 't.jpg'
+            orim = Image.open(dir_gallery+'/'+pic)
             article.photo_gallery.append((
                 pic,
                 os.path.join(dir_photo, photo),
                 os.path.join(dir_thumb, thumb),
                 exifs.get(pic, ''),
-                captions.get(pic, '')))
+                captions.get(pic, ''),calcScaled(orim.size)))
             enqueue_resize(
                 os.path.join(dir_gallery, pic),
                 os.path.join(dir_thumb, thumb),
