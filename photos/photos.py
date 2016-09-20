@@ -88,10 +88,13 @@ def resize_photos(generator, writer):
                     for tag, value in exif.items():
                         decoded = ExifTags.TAGS.get(tag, tag)
                         if decoded == 'Orientation':
-                            if   value == 3: im = im.rotate(180)
-                            elif value == 6: im = im.rotate(270)
-                            elif value == 8: im = im.rotate(90)
+                            print('photos: exif orientation: {}'.format(value))
+                            if   value == 3: im = im.transpose(Image.ROTATE_180)
+                            elif value == 6: im = im.transpose(Image.ROTATE_270)
+                            elif value == 8: im = im.transpose(Image.ROTATE_90)
                             break
+                        else:
+                            logger.info("photos: no exif rotation")
                 im.thumbnail((spec[0], spec[1]), Image.ANTIALIAS)
                 try:
                     os.makedirs(os.path.split(resized)[0])
